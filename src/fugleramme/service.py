@@ -54,6 +54,11 @@ def _due(minutes: int, last: float | None) -> bool:
     return last is None or time.monotonic() - last >= minutes * 60
 
 
+def _due_seconds(seconds: int, last: float | None) -> bool:
+    """As `_due`, for the Rolling page's own interval."""
+    return last is None or time.monotonic() - last >= seconds
+
+
 def _paced(settings: Settings) -> Settings:
     """Settings as the refresh floor sees them: signing in or out rotates the
     session secret, which changes nothing on the page and must not skip the floor."""
@@ -116,7 +121,9 @@ def run(config: Config) -> None:
     # Ours only: PIL's debug level is a line per PNG chunk.
     logging.getLogger("fugleramme").setLevel(os.environ.get("FUGLERAMME_LOG_LEVEL", "INFO"))
     # `kill -USR1 <pid>` dumps every thread's stack to the journal - for when it wedges.
-    faulthandler.register(signal.SIGUSR1, all_threads=True)
+    # POSIX-only: SIGUSR1 and faulthandler.register are absent on Windows.
+    if hasattr(signal, "SIGUSR1"):
+        faulthandler.register(signal.SIGUSR1, all_threads=True)
 
     log.info("Fugleramme v%s", __version__)
 
@@ -158,6 +165,7 @@ def run(config: Config) -> None:
     last_key: tuple | None = None
     last_settings: Settings | None = None
     last_render: float | None = None
+    last_rolling: float | None = None
     last_artless: list[str] | None = None
     pending = None  # rendered but not yet on the glass; survives a failed push
     unreachable = False
@@ -181,6 +189,18 @@ def run(config: Config) -> None:
         )
         try:
             last_artless = _log_artless(ctx, last_artless)
+            # The Rolling page trades a place for a random bird of the region on
+            # its own interval, and fills up to its floor at once. Only here: a
+            # render path (the kiosk, the admin preview) would advance it on every poll.
+            if ctx.mode == modes.ROLLING:
+                ring = modes.rolling(ctx)
+                if len(ring.names()) < settings.rolling_min or _due_seconds(
+                    settings.rolling_seconds, last_rolling
+                ):
+                    if ring.tick(
+                        modes.rolling_pool(ctx), settings.rolling_min, settings.rolling_max
+                    ):
+                        last_rolling = time.monotonic()
             key = (modes.state_key(ctx), settings.rotation)
             # The floor paces the birds alone; a saved setting goes straight through.
             if key != last_key and (

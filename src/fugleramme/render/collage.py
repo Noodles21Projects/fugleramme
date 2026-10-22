@@ -822,12 +822,18 @@ def gather_entries(
     limit: int = NO_LIMIT,
     ranking: str = DEFAULT_RANKING,
     spotlight: str | None = None,
+    selected: list[str] | None = None,
 ) -> list[tuple[str, Path | None]]:
     """The page's species paired with the artwork each is wearing. The None only
-    stands for a file that vanished between `selected_species` and here."""
+    stands for a file that vanished between `selected_species` and here.
+
+    `selected` hands the page an explicit list instead of the window's ranking,
+    which is what the Rolling variety page draws: its birds are chosen over time,
+    not from the window on each render."""
+    names = selected if selected is not None else selected_species(
+        source, images_dir, style, hours, limit, ranking, spotlight=spotlight
+    )
     return [
         (name, image_for(name, images_dir, style, picks))
-        for name in selected_species(
-            source, images_dir, style, hours, limit, ranking, spotlight=spotlight
-        )
+        for name in names
     ]

@@ -37,10 +37,13 @@ from http.cookies import CookieError, SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import ClassVar
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
+
+from PIL import Image
 
 from .. import __version__, e6, modes, updates
 from ..languages import namer
+from ..names import image_for
 from ..panel import Panel, resolution_of
 from ..picks import Picks
 from ..render.paper import paper_tile
@@ -55,6 +58,7 @@ REQUEST_TIMEOUT = 15
 
 HTML = "text/html; charset=utf-8"
 JSON = "application/json"
+PNG = "image/png"
 
 # What a password covers (#52). The kiosk stays open whatever is set: it is the
 # product, and the demo page and the container's healthcheck read it as strangers.
@@ -89,6 +93,32 @@ FILES = {
 
 
 @functools.cache
+def _dimension(raw: str, default: int) -> int:
+    """A pixel width from a query string, clamped - a stranger should not be able
+    to ask for a metre-wide canvas. Empty or unparseable takes the default."""
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return default
+    return max(16, min(value, 1024))
+
+
+def _plate_png(path: Path, width: int) -> bytes:
+    """A plate cropped to the bird and scaled to `width`, PNG with its transparency
+    kept. The collage packs the same artwork; this is that one bird alone, for a
+    screen that shows a single bird and cannot crop transparent air itself."""
+    image = Image.open(path).convert("RGBA")
+    box = image.getchannel("A").getbbox()
+    if box:
+        image = image.crop(box)
+    if image.width > width:
+        height = max(1, round(image.height * width / image.width))
+        image = image.resize((width, height), Image.LANCZOS)
+    buffer = io.BytesIO()
+    image.save(buffer, "PNG")
+    return buffer.getvalue()
+
+
 def paper_png() -> bytes:
     buffer = io.BytesIO()
     paper_tile().save(buffer, format="PNG")
@@ -387,6 +417,52 @@ def make_handler(
                 JSON,
             )
 
+        def _birds(self):
+            """The current page's birds as JSON, for an output that cannot render
+            the page itself (the StickS3's screen): the name as the page would
+            write it, and the URL of the plate it would draw - null when the bird
+            has none, so a caller can skip it. The Rolling page is listed in ring
+            order, oldest first, its newest bird last."""
+            ctx = self._context(store.get())
+            width = _dimension(self._query().get("w", [""])[0], 160)
+            names = (
+                modes.rolling(ctx).names()
+                if ctx.mode == modes.ROLLING
+                else modes.subjects(ctx)
+            )
+            birds = []
+            for name in names:
+                drawn = image_for(name, ctx.images_dir, ctx.style, ctx.picks)
+                birds.append(
+                    {
+                        "scientific": name,
+                        "common": ctx.namer.parts(name)[0],
+                        "label": ctx.namer.inline(name),
+                        "plate": (
+                            f"/plate.png?species={quote(name)}&w={width}" if drawn else None
+                        ),
+                    }
+                )
+            self._send(
+                200,
+                json.dumps({"mode": ctx.mode, "count": len(birds), "birds": birds}).encode(),
+                JSON,
+            )
+
+        def _plate(self):
+            """One bird's artwork, cropped to the bird and scaled, as PNG - the
+            same plate the collage draws, for a screen that only needs the bird."""
+            scientific = self._query().get("species", [""])[0]
+            if not scientific:
+                self._send(400, b"species is required", "text/plain")
+                return
+            ctx = self._context(store.get())
+            path = image_for(scientific, ctx.images_dir, ctx.style, ctx.picks)
+            if path is None:
+                self._send(404, b"no artwork for that species", "text/plain")
+                return
+            self._send_cached(_plate_png(path, _dimension(self._query().get("w", [""])[0], 160)), PNG)
+
         def _admin(self):
             settings = store.get()
             html = admin.page(
@@ -426,6 +502,8 @@ def make_handler(
             "/state": _state,
             "/paper.png": _paper,
             "/species": _species,
+            "/birds": _birds,
+            "/plate.png": _plate,
             "/admin": _admin,
             "/update": _update,
             "/health": _health,

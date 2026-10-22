@@ -402,7 +402,10 @@ def _written(code: str, when: datetime, clock: bool) -> str:
 
 def numeric(when: datetime, clock: bool) -> str:
     """A date in figures alone, which any face can set."""
-    return when.astimezone().strftime("%-d.%m %H:%M" if clock else "%-d.%m.%Y")
+    written = when.astimezone().strftime("%d.%m %H:%M" if clock else "%d.%m.%Y")
+    # %-d (no leading zero) is glibc-only; Windows strftime rejects it, so drop
+    # the zero afterwards.
+    return written[1:] if written.startswith("0") else written
 
 
 def _capitalized(name: str) -> str:

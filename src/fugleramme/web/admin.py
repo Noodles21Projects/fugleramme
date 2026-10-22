@@ -246,8 +246,13 @@ def _ago(dt: datetime) -> str:
 
 def _stamp(dt: datetime) -> str:
     local = dt.astimezone()
-    fmt = "%H:%M" if local.date() == datetime.now().astimezone().date() else "%-d %b %H:%M"
-    return f'<time title="{_ago(dt)}">{local.strftime(fmt)}</time>'
+    if local.date() == datetime.now().astimezone().date():
+        stamped = local.strftime("%H:%M")
+    else:
+        # %-d is glibc-only; Windows strftime rejects it, so drop the zero ourselves.
+        stamped = local.strftime("%d %b %H:%M")
+        stamped = stamped[1:] if stamped.startswith("0") else stamped
+    return f'<time title="{_ago(dt)}">{stamped}</time>'
 
 
 def _species_li(scientific: str, label: str, source: str | None, url: str) -> str:
@@ -718,6 +723,29 @@ def _species_field(settings: Settings) -> str:
     )
 
 
+def _rolling_field(settings: Settings) -> str:
+    """The Rolling variety page's own numbers: how often it trades a bird, and the
+    band of how many it holds. Equal counts pin the size; a range lets it shift."""
+    hint = (
+        "A collage of random birds of the region - ignoring what was heard. "
+        "It fills to the first count, trades one bird every interval (oldest "
+        "first) and drifts up to the second, so the collage shifts size."
+    )
+    return (
+        f'<div class="field" id="rolling">'
+        f"<span>Rolling variety {_hint(hint)}</span>"
+        f'<div class="src"><label class="src">trade every'
+        f'<input type="number" name="rolling_seconds" min="5" max="3600"'
+        f' value="{settings.rolling_seconds}" aria-label="Seconds between trades">s</label>'
+        f'<label class="src">holds'
+        f'<input type="number" name="rolling_min" min="1" max="200"'
+        f' value="{settings.rolling_min}" aria-label="Fewest birds">'
+        f'to<input type="number" name="rolling_max" min="1" max="200"'
+        f' value="{settings.rolling_max}" aria-label="Most birds"></label></div>'
+        f"</div>"
+    )
+
+
 def _radio_field(
     label: str, name: str, options: list[tuple[str, str]], active: str, id: str = ""
 ) -> str:
@@ -814,6 +842,7 @@ def page(
         lookback_disabled="" if windowed else " disabled",
         lookbacks=_lookbacks(settings),
         limit_field=_species_field(settings),
+        rolling_field=_rolling_field(settings),
         layout_field=_layout_field(settings),
         names_field=_names_field(settings, languages, names_failure, face_notes),
         style_field=_radio_field(

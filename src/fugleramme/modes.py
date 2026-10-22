@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import hashlib
 import io
+import json
 import logging
 import threading
 from collections.abc import Callable
@@ -27,12 +28,13 @@ from typing import TYPE_CHECKING
 from PIL import Image
 
 from .languages import STATION, Drawable, Namer, english_name, station_locale
-from .names import drawable_keys, image_for, normalize, perches_for, resolve
+from .names import canonical, drawable_keys, image_for, normalize, perches_for, resolve
 from .picks import Picks
 from .render import fonts
 from .render.collage import KEY_LIMIT, NO_LIMIT, gather_entries, render_collage, selected_species
 from .render.page import NEW, Edges, day_ordinal
 from .render.plate import effective_margin, render_plate
+from .rolling import FILENAME as ROLLING_FILE, Rolling
 from .source import Source, Species
 
 if TYPE_CHECKING:
@@ -329,9 +331,90 @@ def _collage_subjects(ctx: Context) -> list[str]:
     return sorted(_selected(ctx, keys) + artless(ctx, keys))
 
 
+def rolling(ctx: Context) -> Rolling:
+    """The Rolling variety page's ring of birds, persisted beside artwork.json so
+    a restart resumes the same page. Only the loop advances it - see service.py."""
+    return Rolling(ctx.picks.path.parent / ROLLING_FILE)
+
+
+def region_names(ctx: Context) -> list[str]:
+    """The species the station's region can expect, from region.json beside
+    artwork.json - a list of scientific names, one per bird. Empty when the file
+    is absent or unreadable, which leaves the page drawing from the window."""
+    path = ctx.picks.path.parent / REGION_FILE
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return []
+    return [str(name) for name in raw] if isinstance(raw, list) else []
+
+
+def rolling_pool(ctx: Context) -> list[str]:
+    """The names the Rolling page may draw a bird from: the region's species,
+    folded to one name per bird, and only the ones the style can draw. Without a
+    region list it falls back to what the window heard."""
+    keys = ctx.drawable()
+    named = region_names(ctx) or [name for name, _n in ctx.source.species_since(ctx.lookback_hours)]
+    folded = {canonical(name) for name in named}
+    return sorted(name for name in folded if normalize(name) in keys)
+
+
+def _rolling_names(ctx: Context) -> list[str]:
+    """The ring, minus anything the style cannot draw, in name order: the packing
+    must not reshuffle when a bird joins."""
+    keys = ctx.drawable()
+    return sorted(name for name in rolling(ctx).names() if normalize(name) in keys)
+
+
+def _rolling_key(ctx: Context) -> tuple:
+    names = tuple(_rolling_names(ctx))
+    return (names, day_ordinal() if not names else None)
+
+
+def _rolling_page(ctx: Context) -> Image.Image:
+    names = _rolling_names(ctx)
+    if not names:
+        return _plate(ctx, None)
+    return render_collage(
+        gather_entries(
+            ctx.source,
+            ctx.images_dir,
+            ctx.style,
+            ctx.picks,
+            ctx.lookback_hours,
+            ctx.species_limit,
+            ctx.ranking,
+            selected=names,
+        ),
+        ctx.resolution,
+        ctx.show_names,
+        ctx.textured,
+        ctx.font_key,
+        ctx.label_size,
+        _labeller(ctx),
+        ctx.perches(),
+        ctx.layout,
+        ctx.margin,
+        ctx.name_key,
+        None,
+    )
+
+
+def _rolling_subjects(ctx: Context) -> list[str]:
+    keys = ctx.drawable()
+    return sorted(_rolling_names(ctx) + artless(ctx, keys))
+
+
 # Insertion order is the order button A walks.
 MODES: dict[str, Mode] = {
     "collage": Mode("Collage (default)", _collage, _collage_key, _collage_subjects, windowed=True),
+    "rolling": Mode(
+        "Rolling variety",
+        _rolling_page,
+        _rolling_key,
+        _rolling_subjects,
+        windowed=True,
+    ),
     "latest": Mode(
         "Latest bird",
         _latest_page,
@@ -342,6 +425,8 @@ MODES: dict[str, Mode] = {
 }
 
 DEFAULT_MODE = "collage"
+ROLLING = "rolling"  # the loop advances its ring; nothing else may
+REGION_FILE = "region.json"  # the station's regional species, beside artwork.json
 
 
 def mode_of(key: str) -> Mode:

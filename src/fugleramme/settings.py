@@ -99,6 +99,13 @@ class Settings:
     external_panel: bool = False
     lookback_hours: float = 24
     refresh_minutes: int = 0
+    # How often the Rolling variety page trades a bird: seconds, not minutes, so a
+    # lively page is possible without the refresh floor pacing it.
+    rolling_seconds: int = 30
+    # How many birds the Rolling page holds. A range, so the collage's size may
+    # shift between them; equal numbers pin it. It always sheds the oldest first.
+    rolling_min: int = 10
+    rolling_max: int = 10
     # The collage's own default, as a percent.
     margin: int = round(DEFAULT_MARGIN * 100)
     # The panel's edges while unlocked, on the glass unrotated. None follows `margin`.
@@ -294,6 +301,9 @@ def _coerce(raw: dict, base: Settings | None = None) -> Settings:
         external_panel=_as_bool(raw.get("external_panel"), d.external_panel),
         lookback_hours=_as_hours(raw.get("lookback_hours"), d.lookback_hours),
         refresh_minutes=_as_int(raw.get("refresh_minutes"), d.refresh_minutes, 0, 24 * 60),
+        rolling_seconds=_as_int(raw.get("rolling_seconds"), d.rolling_seconds, 5, 3600),
+        rolling_min=_as_int(raw.get("rolling_min"), d.rolling_min, 1, 200),
+        rolling_max=_as_int(raw.get("rolling_max"), d.rolling_max, 1, 200),
         margin=_as_int(raw.get("margin"), d.margin, 0, MARGIN_CEILING),
         margin_lock=_as_bool(raw.get("margin_lock"), d.margin_lock),
         margin_top=_as_edge(raw.get("margin_top"), d.margin_top),
@@ -408,7 +418,9 @@ class SettingsStore:
         # 0600 at creation: the password must never exist under the umask's mode.
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w") as handle:
-            os.fchmod(fd, 0o600)  # O_CREAT leaves a leftover temp file its old mode
+            # fchmod is POSIX-only; Windows has no file mode to tighten here.
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)  # O_CREAT leaves a leftover temp file its old mode
             handle.write(json.dumps(asdict(settings), indent=2) + "\n")
         os.replace(tmp, self.path)
         self._mtime = self.path.stat().st_mtime
